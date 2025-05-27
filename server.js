@@ -17,14 +17,13 @@ const client = new vision.ImageAnnotatorClient({ credentials });
 
 // Initialiser la base de données
 const db = new sqlite3.Database('./vins.db');
-db.run(\`
-    CREATE TABLE IF NOT EXISTS vins (
+db.run(`
+    CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        code TEXT NOT NULL UNIQUE,
-        date TEXT NOT NULL,
-        image TEXT
+        name TEXT NOT NULL,
+        price REAL NOT NULL
     )
-\`);
+`);
 
 // Configurer multer
 const storage = multer.diskStorage({
