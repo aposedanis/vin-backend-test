@@ -258,6 +258,9 @@ app.get('/api/vins/search', (req, res) => {
 // Import Excel
 app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
     try {
+        console.log('=== DÉBUT IMPORT EXCEL ===');
+        console.log('Fichier reçu:', req.file ? req.file.originalname : 'Aucun fichier');
+
         if (!req.file) {
             return res.status(400).json({ 
                 success: false, 
@@ -265,8 +268,13 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
             });
         }
 
-        const workbook = ExcelJS.Workbook();
+        console.log('Chemin du fichier:', req.file.path);
+        console.log('Taille du fichier:', req.file.size, 'bytes');
+
+        const workbook = new ExcelJS.Workbook();
         await workbook.xlsx.readFile(req.file.path);
+        
+        console.log('Workbook chargé, nombre de feuilles:', workbook.worksheets.length);
         
         const worksheet = workbook.getWorksheet('VINs Enregistrés') || workbook.getWorksheet(1);
         
@@ -277,6 +285,9 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
             });
         }
 
+        console.log('Feuille trouvée:', worksheet.name);
+        console.log('Nombre de lignes:', worksheet.rowCount);
+
         const importedVINs = [];
         const errors = [];
         let duplicates = 0;
@@ -284,7 +295,10 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
 
         // Parcourir les lignes (en ignorant l'en-tête)
         worksheet.eachRow((row, rowNumber) => {
-            if (rowNumber === 1) return; // Ignorer l'en-tête
+            if (rowNumber === 1) {
+                console.log('En-têtes détectés:', row.values);
+                return; // Ignorer l'en-tête
+            }
             
             try {
                 // Lire les colonnes selon le nouveau format Excel
@@ -357,6 +371,9 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
             }
         });
 
+        console.log('VINs à importer:', importedVINs.length);
+        console.log('Erreurs de parsing:', errors.length);
+
         // Insérer les VINs dans la base de données
         const insertPromises = importedVINs.map(vinData => {
             return new Promise((resolve) => {
@@ -364,6 +381,8 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
                     INSERT INTO vins (code, date_created, image_data, user_agent, ip_address)
                     VALUES (?, ?, ?, ?, ?)
                 `;
+                
+                console.log('Insertion VIN:', vinData.code);
                 
                 db.run(query, [
                     vinData.code, 
@@ -373,6 +392,7 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
                     vinData.ipAddress
                 ], function(err) {
                     if (err) {
+                        console.error('Erreur insertion:', err);
                         if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
                             duplicates++;
                             resolve({ status: 'duplicate', code: vinData.code });
@@ -382,6 +402,7 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
                         }
                     } else {
                         imported++;
+                        console.log('VIN inséré avec succès:', vinData.code, 'ID:', this.lastID);
                         resolve({ status: 'success', code: vinData.code, id: this.lastID });
                     }
                 });
@@ -390,8 +411,13 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
 
         await Promise.all(insertPromises);
 
+        console.log('=== RÉSULTATS IMPORT ===');
+        console.log('Importés:', imported);
+        console.log('Doublons:', duplicates);
+        console.log('Erreurs:', errors.length);
+
         // Nettoyer le fichier temporaire
-        require('fs').unlinkSync(req.file.path);
+        fs.unlinkSync(req.file.path);
 
         res.json({
             success: true,
@@ -416,7 +442,7 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
         // Nettoyer le fichier temporaire en cas d'erreur
         if (req.file && req.file.path) {
             try {
-                require('fs').unlinkSync(req.file.path);
+                fs.unlinkSync(req.file.path);
             } catch (cleanupError) {
                 console.error('Erreur lors du nettoyage du fichier :', cleanupError);
             }
