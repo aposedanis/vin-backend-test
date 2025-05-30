@@ -1,5 +1,5 @@
 {
-  "name": "vin-backend",
+  "name": "vin-backend-test",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
