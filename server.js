@@ -266,11 +266,41 @@ app.get('/api/vins/export', async (req, res) => {
                 { header: 'ID', key: 'id', width: 10 },
                 { header: 'Code VIN', key: 'code', width: 20 },
                 { header: 'Date d\'Enregistrement', key: 'date_created', width: 25 },
-                { header: 'Date de Création', key: 'created_at', width: 25 },
+                { header: 'Temps Écoulé', key: 'time_elapsed', width: 20 },
                 { header: 'Navigateur', key: 'user_agent', width: 30 },
                 { header: 'Adresse IP', key: 'ip_address', width: 15 },
                 { header: 'Image Disponible', key: 'has_image', width: 15 }
             ];
+            
+            // Fonction pour calculer le temps écoulé
+            function getTimeElapsed(dateString) {
+                const now = new Date();
+                const date = new Date(dateString);
+                const diffInMs = now - date;
+                const diffInSeconds = Math.floor(diffInMs / 1000);
+                const diffInMinutes = Math.floor(diffInSeconds / 60);
+                const diffInHours = Math.floor(diffInMinutes / 60);
+                const diffInDays = Math.floor(diffInHours / 24);
+                const diffInWeeks = Math.floor(diffInDays / 7);
+                const diffInMonths = Math.floor(diffInDays / 30);
+                const diffInYears = Math.floor(diffInDays / 365);
+
+                if (diffInSeconds < 60) {
+                    return diffInSeconds <= 1 ? "à l'instant" : `il y a ${diffInSeconds} secondes`;
+                } else if (diffInMinutes < 60) {
+                    return diffInMinutes === 1 ? "il y a 1 minute" : `il y a ${diffInMinutes} minutes`;
+                } else if (diffInHours < 24) {
+                    return diffInHours === 1 ? "il y a 1 heure" : `il y a ${diffInHours} heures`;
+                } else if (diffInDays < 7) {
+                    return diffInDays === 1 ? "il y a 1 jour" : `il y a ${diffInDays} jours`;
+                } else if (diffInWeeks < 4) {
+                    return diffInWeeks === 1 ? "il y a 1 semaine" : `il y a ${diffInWeeks} semaines`;
+                } else if (diffInMonths < 12) {
+                    return diffInMonths === 1 ? "il y a 1 mois" : `il y a ${diffInMonths} mois`;
+                } else {
+                    return diffInYears === 1 ? "il y a 1 an" : `il y a ${diffInYears} ans`;
+                }
+            }
             
             // Ajouter les données
             rows.forEach(row => {
@@ -278,7 +308,7 @@ app.get('/api/vins/export', async (req, res) => {
                     id: row.id,
                     code: row.code,
                     date_created: new Date(row.date_created).toLocaleString('fr-FR'),
-                    created_at: new Date(row.created_at).toLocaleString('fr-FR'),
+                    time_elapsed: getTimeElapsed(row.date_created),
                     user_agent: row.user_agent || 'Non spécifié',
                     ip_address: row.ip_address || 'Non spécifié',
                     has_image: row.image_data ? 'Oui' : 'Non'
@@ -293,6 +323,13 @@ app.get('/api/vins/export', async (req, res) => {
                     pattern: 'solid',
                     fgColor: { argb: 'FFE0E0E0' }
                 };
+            });
+            
+            // Styliser la colonne "Temps Écoulé"
+            worksheet.getColumn('time_elapsed').eachCell((cell, rowNumber) => {
+                if (rowNumber > 1) { // Ignorer l'en-tête
+                    cell.font = { color: { argb: 'FF667eea' }, bold: true };
+                }
             });
             
             // Générer le fichier
