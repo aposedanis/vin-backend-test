@@ -45,8 +45,17 @@ db.serialize(() => {
 });
 
 // Configurer multer
+const fs = require('fs');
+const uploadsDir = './uploads/';
+
+// Créer le dossier uploads s'il n'existe pas
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log('📁 Dossier uploads créé');
+}
+
 const storage = multer.diskStorage({
-    destination: './uploads/',
+    destination: uploadsDir,
     filename: function(req, file, cb) {
         cb(null, Date.now() + path.extname(file.originalname));
     }
@@ -278,16 +287,26 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
             if (rowNumber === 1) return; // Ignorer l'en-tête
             
             try {
-                const id = row.getCell(1).value;
-                const code = row.getCell(2).value;
-                const dateEnregistrement = row.getCell(3).value;
-                const navigateur = row.getCell(5).value;
-                const adresseIP = row.getCell(6).value;
-                const imageDisponible = row.getCell(7).value;
+                // Lire les colonnes selon le nouveau format Excel
+                const id = row.getCell(1).value; // Colonne A: ID
+                const code = row.getCell(2).value; // Colonne B: Code VIN
+                const dateEnregistrement = row.getCell(3).value; // Colonne C: Date d'Enregistrement
+                // Colonne D: Temps Écoulé (ignorée car calculée dynamiquement)
+                const navigateur = row.getCell(5).value; // Colonne E: Navigateur
+                const adresseIP = row.getCell(6).value; // Colonne F: Adresse IP
+                const imageDisponible = row.getCell(7).value; // Colonne G: Image Disponible
+
+                console.log(`Ligne ${rowNumber}:`, { code, dateEnregistrement, navigateur, adresseIP, imageDisponible });
 
                 // Validation basique
-                if (!code || !isValidVIN(code.toString().toUpperCase())) {
-                    errors.push(`Ligne ${rowNumber}: VIN invalide "${code}"`);
+                if (!code || typeof code !== 'string') {
+                    errors.push(`Ligne ${rowNumber}: Code VIN manquant ou invalide`);
+                    return;
+                }
+
+                const codeStr = code.toString().trim().toUpperCase();
+                if (!isValidVIN(codeStr)) {
+                    errors.push(`Ligne ${rowNumber}: VIN invalide "${codeStr}"`);
                     return;
                 }
 
@@ -301,28 +320,39 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
                 if (dateEnregistrement instanceof Date) {
                     dateISO = dateEnregistrement.toISOString();
                 } else if (typeof dateEnregistrement === 'string') {
-                    // Essayer de parser la date française "30/05/2025 10:05:16"
-                    const dateParts = dateEnregistrement.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(\d{1,2}):(\d{1,2}):(\d{1,2})/);
-                    if (dateParts) {
-                        const [, day, month, year, hour, minute, second] = dateParts;
+                    // Essayer de parser différents formats de date
+                    const dateStr = dateEnregistrement.toString();
+                    
+                    // Format français "30/05/2025 10:41:24"
+                    const frenchFormat = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(\d{1,2}):(\d{1,2}):(\d{1,2})/);
+                    if (frenchFormat) {
+                        const [, day, month, year, hour, minute, second] = frenchFormat;
                         dateISO = new Date(year, month - 1, day, hour, minute, second).toISOString();
                     } else {
-                        dateISO = new Date(dateEnregistrement).toISOString();
+                        // Essayer le parsing automatique
+                        const parsedDate = new Date(dateStr);
+                        if (!isNaN(parsedDate.getTime())) {
+                            dateISO = parsedDate.toISOString();
+                        } else {
+                            errors.push(`Ligne ${rowNumber}: Format de date invalide "${dateStr}"`);
+                            return;
+                        }
                     }
                 } else {
-                    errors.push(`Ligne ${rowNumber}: Format de date invalide`);
+                    errors.push(`Ligne ${rowNumber}: Format de date non supporté`);
                     return;
                 }
 
                 importedVINs.push({
-                    code: code.toString().toUpperCase(),
+                    code: codeStr,
                     date: dateISO,
-                    userAgent: navigateur || 'Import Excel',
-                    ipAddress: adresseIP || 'Import',
+                    userAgent: navigateur ? navigateur.toString() : 'Import Excel',
+                    ipAddress: adresseIP ? adresseIP.toString() : 'Import',
                     hasImage: imageDisponible === 'Oui'
                 });
 
             } catch (error) {
+                console.error(`Erreur ligne ${rowNumber}:`, error);
                 errors.push(`Ligne ${rowNumber}: Erreur lors du traitement - ${error.message}`);
             }
         });
