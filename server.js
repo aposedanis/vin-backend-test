@@ -246,6 +246,159 @@ app.get('/api/vins/search', (req, res) => {
     });
 });
 
+// Import Excel
+app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Aucun fichier Excel fourni' 
+            });
+        }
+
+        const workbook = ExcelJS.Workbook();
+        await workbook.xlsx.readFile(req.file.path);
+        
+        const worksheet = workbook.getWorksheet('VINs Enregistrés') || workbook.getWorksheet(1);
+        
+        if (!worksheet) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Aucune feuille de calcul trouvée dans le fichier' 
+            });
+        }
+
+        const importedVINs = [];
+        const errors = [];
+        let duplicates = 0;
+        let imported = 0;
+
+        // Parcourir les lignes (en ignorant l'en-tête)
+        worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber === 1) return; // Ignorer l'en-tête
+            
+            try {
+                const id = row.getCell(1).value;
+                const code = row.getCell(2).value;
+                const dateEnregistrement = row.getCell(3).value;
+                const navigateur = row.getCell(5).value;
+                const adresseIP = row.getCell(6).value;
+                const imageDisponible = row.getCell(7).value;
+
+                // Validation basique
+                if (!code || !isValidVIN(code.toString().toUpperCase())) {
+                    errors.push(`Ligne ${rowNumber}: VIN invalide "${code}"`);
+                    return;
+                }
+
+                if (!dateEnregistrement) {
+                    errors.push(`Ligne ${rowNumber}: Date d'enregistrement manquante`);
+                    return;
+                }
+
+                // Convertir la date
+                let dateISO;
+                if (dateEnregistrement instanceof Date) {
+                    dateISO = dateEnregistrement.toISOString();
+                } else if (typeof dateEnregistrement === 'string') {
+                    // Essayer de parser la date française "30/05/2025 10:05:16"
+                    const dateParts = dateEnregistrement.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(\d{1,2}):(\d{1,2}):(\d{1,2})/);
+                    if (dateParts) {
+                        const [, day, month, year, hour, minute, second] = dateParts;
+                        dateISO = new Date(year, month - 1, day, hour, minute, second).toISOString();
+                    } else {
+                        dateISO = new Date(dateEnregistrement).toISOString();
+                    }
+                } else {
+                    errors.push(`Ligne ${rowNumber}: Format de date invalide`);
+                    return;
+                }
+
+                importedVINs.push({
+                    code: code.toString().toUpperCase(),
+                    date: dateISO,
+                    userAgent: navigateur || 'Import Excel',
+                    ipAddress: adresseIP || 'Import',
+                    hasImage: imageDisponible === 'Oui'
+                });
+
+            } catch (error) {
+                errors.push(`Ligne ${rowNumber}: Erreur lors du traitement - ${error.message}`);
+            }
+        });
+
+        // Insérer les VINs dans la base de données
+        const insertPromises = importedVINs.map(vinData => {
+            return new Promise((resolve) => {
+                const query = `
+                    INSERT INTO vins (code, date_created, image_data, user_agent, ip_address)
+                    VALUES (?, ?, ?, ?, ?)
+                `;
+                
+                db.run(query, [
+                    vinData.code, 
+                    vinData.date, 
+                    vinData.hasImage ? 'imported_image_placeholder' : null,
+                    vinData.userAgent,
+                    vinData.ipAddress
+                ], function(err) {
+                    if (err) {
+                        if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+                            duplicates++;
+                            resolve({ status: 'duplicate', code: vinData.code });
+                        } else {
+                            errors.push(`VIN ${vinData.code}: ${err.message}`);
+                            resolve({ status: 'error', code: vinData.code });
+                        }
+                    } else {
+                        imported++;
+                        resolve({ status: 'success', code: vinData.code, id: this.lastID });
+                    }
+                });
+            });
+        });
+
+        await Promise.all(insertPromises);
+
+        // Nettoyer le fichier temporaire
+        require('fs').unlinkSync(req.file.path);
+
+        res.json({
+            success: true,
+            message: `Import terminé avec succès`,
+            summary: {
+                totalLines: importedVINs.length,
+                imported: imported,
+                duplicates: duplicates,
+                errors: errors.length
+            },
+            details: {
+                importedCount: imported,
+                duplicatesCount: duplicates,
+                errorsCount: errors.length,
+                errorsList: errors.slice(0, 10) // Limiter à 10 erreurs pour l'affichage
+            }
+        });
+
+    } catch (error) {
+        console.error('Erreur lors de l\'import Excel :', error);
+        
+        // Nettoyer le fichier temporaire en cas d'erreur
+        if (req.file && req.file.path) {
+            try {
+                require('fs').unlinkSync(req.file.path);
+            } catch (cleanupError) {
+                console.error('Erreur lors du nettoyage du fichier :', cleanupError);
+            }
+        }
+        
+        res.status(500).json({ 
+            success: false, 
+            error: `Erreur lors de l'import: ${error.message}` 
+        });
+    }
+});
+
 // Export Excel
 app.get('/api/vins/export', async (req, res) => {
     try {
