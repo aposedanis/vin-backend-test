@@ -136,17 +136,30 @@ async function initDatabase() {
     await pool.query('SELECT NOW()');
     console.log('✅ Connexion à Supabase établie');
     
-    // Créer la table vins si elle n'existe pas
+    // Créer la table vins SANS stockage d'images
     await pool.query(`
       CREATE TABLE IF NOT EXISTS vins (
         id SERIAL PRIMARY KEY,
         code VARCHAR(17) NOT NULL UNIQUE,
         date_created TIMESTAMP WITH TIME ZONE NOT NULL,
-        image_data TEXT,
         user_agent TEXT,
         ip_address INET,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+    
+    // Supprimer la colonne image_data si elle existe (migration)
+    await pool.query(`
+      DO $$ 
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'vins' AND column_name = 'image_data'
+        ) THEN
+          ALTER TABLE vins DROP COLUMN image_data;
+          RAISE NOTICE 'Colonne image_data supprimée';
+        END IF;
+      END $$;
     `);
     
     // Index pour optimiser les recherches
@@ -169,7 +182,7 @@ async function initDatabase() {
       END $$;
     `);
     
-    console.log('✅ Base Supabase initialisée avec succès');
+    console.log('✅ Base Supabase initialisée sans stockage d\'images');
     
     // Test de connexion et comptage
     const result = await pool.query('SELECT COUNT(*) as total FROM vins');
@@ -184,9 +197,8 @@ async function initDatabase() {
   }
 }
 
-// ========== CONFIGURATION MULTER ==========
+// ========== CONFIGURATION MULTER (pour import Excel seulement) ==========
 
-// Configurer multer pour uploads
 const uploadsDir = './uploads/';
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -232,11 +244,11 @@ app.post('/api/ocr/process', async (req, res) => {
 
 // ========== ROUTES VINS ==========
 
-// Récupérer tous les VINs
+// Récupérer tous les VINs (SANS images)
 app.get('/api/vins', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, code, date_created, image_data, user_agent, ip_address, created_at 
+      SELECT id, code, date_created, user_agent, ip_address, created_at 
       FROM vins 
       ORDER BY created_at DESC
     `);
@@ -245,7 +257,6 @@ app.get('/api/vins', async (req, res) => {
       id: row.id,
       code: row.code,
       date: row.date_created,
-      image: row.image_data,
       userAgent: row.user_agent,
       ipAddress: row.ip_address,
       createdAt: row.created_at
@@ -258,9 +269,9 @@ app.get('/api/vins', async (req, res) => {
   }
 });
 
-// Créer un nouveau VIN
+// Créer un nouveau VIN (SANS image)
 app.post('/api/vins', async (req, res) => {
-  const { code, date, image, userAgent } = req.body;
+  const { code, date, userAgent } = req.body;
   const ipAddress = req.ip || req.connection.remoteAddress;
   
   if (!code || !isValidVIN(code)) {
@@ -272,13 +283,12 @@ app.post('/api/vins', async (req, res) => {
   
   try {
     const result = await pool.query(`
-      INSERT INTO vins (code, date_created, image_data, user_agent, ip_address)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO vins (code, date_created, user_agent, ip_address)
+      VALUES ($1, $2, $3, $4)
       RETURNING *
     `, [
       code.toUpperCase(), 
       date || new Date().toISOString(), 
-      image || null, 
       userAgent || null, 
       ipAddress
     ]);
@@ -291,7 +301,6 @@ app.post('/api/vins', async (req, res) => {
         id: row.id,
         code: row.code,
         date: row.date_created,
-        image: row.image_data,
         userAgent: row.user_agent,
         ipAddress: row.ip_address,
         createdAt: row.created_at
@@ -385,7 +394,6 @@ app.get('/api/vins/search', async (req, res) => {
       id: row.id,
       code: row.code,
       date: row.date_created,
-      image: row.image_data,
       userAgent: row.user_agent,
       ipAddress: row.ip_address,
       createdAt: row.created_at
@@ -399,7 +407,7 @@ app.get('/api/vins/search', async (req, res) => {
   }
 });
 
-// Import Excel
+// Import Excel (SANS gestion d'images)
 app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
   try {
     console.log('=== DÉBUT IMPORT EXCEL ===');
@@ -450,9 +458,9 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
         const dateEnregistrement = row.getCell(3).value; // Colonne C: Date d'Enregistrement
         const navigateur = row.getCell(5).value; // Colonne E: Navigateur
         const adresseIP = row.getCell(6).value; // Colonne F: Adresse IP
-        const imageDisponible = row.getCell(7).value; // Colonne G: Image Disponible
+        // Pas de lecture de la colonne "Image Disponible"
 
-        console.log(`Ligne ${rowNumber}:`, { code, dateEnregistrement, navigateur, adresseIP, imageDisponible });
+        console.log(`Ligne ${rowNumber}:`, { code, dateEnregistrement, navigateur, adresseIP });
 
         // Validation basique
         if (!code || typeof code !== 'string') {
@@ -501,8 +509,7 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
           code: codeStr,
           date: dateISO,
           userAgent: navigateur ? navigateur.toString() : 'Import Excel',
-          ipAddress: adresseIP ? adresseIP.toString() : 'Import',
-          hasImage: imageDisponible === 'Oui'
+          ipAddress: adresseIP ? adresseIP.toString() : 'Import'
         });
 
       } catch (error) {
@@ -514,18 +521,17 @@ app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
     console.log('VINs à importer:', importedVINs.length);
     console.log('Erreurs de parsing:', errors.length);
 
-    // Insérer les VINs dans la base de données PostgreSQL
+    // Insérer les VINs dans la base de données PostgreSQL (SANS images)
     for (const vinData of importedVINs) {
       try {
         console.log('Insertion VIN:', vinData.code);
         
         await pool.query(`
-          INSERT INTO vins (code, date_created, image_data, user_agent, ip_address)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO vins (code, date_created, user_agent, ip_address)
+          VALUES ($1, $2, $3, $4)
         `, [
           vinData.code, 
           vinData.date, 
-          vinData.hasImage ? 'imported_image_placeholder' : null,
           vinData.userAgent,
           vinData.ipAddress
         ]);
@@ -612,7 +618,7 @@ app.get('/api/vins/stats', async (req, res) => {
   }
 });
 
-// Export Excel
+// Export Excel (SANS colonne Image)
 app.get('/api/vins/export', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM vins ORDER BY created_at DESC');
@@ -626,8 +632,7 @@ app.get('/api/vins/export', async (req, res) => {
       { header: 'Date d\'Enregistrement', key: 'date_created', width: 25 },
       { header: 'Temps Écoulé', key: 'time_elapsed', width: 20 },
       { header: 'Navigateur', key: 'user_agent', width: 30 },
-      { header: 'Adresse IP', key: 'ip_address', width: 15 },
-      { header: 'Image Disponible', key: 'has_image', width: 15 }
+      { header: 'Adresse IP', key: 'ip_address', width: 15 }
     ];
     
     function getTimeElapsed(dateString) {
@@ -650,8 +655,7 @@ app.get('/api/vins/export', async (req, res) => {
         date_created: new Date(row.date_created).toLocaleString('fr-FR'),
         time_elapsed: getTimeElapsed(row.date_created),
         user_agent: row.user_agent || 'Non spécifié',
-        ip_address: row.ip_address || 'Non spécifié',
-        has_image: row.image_data ? 'Oui' : 'Non'
+        ip_address: row.ip_address || 'Non spécifié'
       });
     });
     
@@ -694,8 +698,8 @@ initDatabase();
 // Démarrage du serveur
 app.listen(port, () => {
   console.log(`🚗 Serveur VIN Tracker en écoute sur http://localhost:${port}`);
-  console.log(`🗄️ Base de données Supabase PostgreSQL configurée`);
-  console.log(`🔍 OCR Google Vision API configuré`);
+  console.log(`🗄️ Base de données Supabase PostgreSQL configurée (SANS stockage images)`);
+  console.log(`🔍 OCR Google Vision API configuré (traitement temporaire uniquement)`);
   console.log(`🏓 Routes de monitoring activées :`);
   console.log(`   - Health Check: /api/health (pour UptimeRobot)`);
   console.log(`   - Status Check: /api/status (détaillé)`);
