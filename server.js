@@ -13,7 +13,7 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Configuration Supabase PostgreSQL
+// Configuration Supabase PostgreSQL avec Transaction Pooler
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -280,6 +280,194 @@ app.get('/api/vins/search', async (req, res) => {
   } catch (error) {
     console.error('Erreur recherche VINs :', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Import Excel - ROUTE MANQUANTE AJOUTÉE
+app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
+  try {
+    console.log('=== DÉBUT IMPORT EXCEL ===');
+    console.log('Fichier reçu:', req.file ? req.file.originalname : 'Aucun fichier');
+
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Aucun fichier Excel fourni' 
+      });
+    }
+
+    console.log('Chemin du fichier:', req.file.path);
+    console.log('Taille du fichier:', req.file.size, 'bytes');
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(req.file.path);
+    
+    console.log('Workbook chargé, nombre de feuilles:', workbook.worksheets.length);
+    
+    const worksheet = workbook.getWorksheet('VINs Enregistrés') || workbook.getWorksheet(1);
+    
+    if (!worksheet) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Aucune feuille de calcul trouvée dans le fichier' 
+      });
+    }
+
+    console.log('Feuille trouvée:', worksheet.name);
+    console.log('Nombre de lignes:', worksheet.rowCount);
+
+    const importedVINs = [];
+    const errors = [];
+    let duplicates = 0;
+    let imported = 0;
+
+    // Parcourir les lignes (en ignorant l'en-tête)
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) {
+        console.log('En-têtes détectés:', row.values);
+        return; // Ignorer l'en-tête
+      }
+      
+      try {
+        // Lire les colonnes selon le format Excel
+        const code = row.getCell(2).value; // Colonne B: Code VIN
+        const dateEnregistrement = row.getCell(3).value; // Colonne C: Date d'Enregistrement
+        const navigateur = row.getCell(5).value; // Colonne E: Navigateur
+        const adresseIP = row.getCell(6).value; // Colonne F: Adresse IP
+        const imageDisponible = row.getCell(7).value; // Colonne G: Image Disponible
+
+        console.log(`Ligne ${rowNumber}:`, { code, dateEnregistrement, navigateur, adresseIP, imageDisponible });
+
+        // Validation basique
+        if (!code || typeof code !== 'string') {
+          errors.push(`Ligne ${rowNumber}: Code VIN manquant ou invalide`);
+          return;
+        }
+
+        const codeStr = code.toString().trim().toUpperCase();
+        if (!isValidVIN(codeStr)) {
+          errors.push(`Ligne ${rowNumber}: VIN invalide "${codeStr}"`);
+          return;
+        }
+
+        if (!dateEnregistrement) {
+          errors.push(`Ligne ${rowNumber}: Date d'enregistrement manquante`);
+          return;
+        }
+
+        // Convertir la date
+        let dateISO;
+        if (dateEnregistrement instanceof Date) {
+          dateISO = dateEnregistrement.toISOString();
+        } else if (typeof dateEnregistrement === 'string') {
+          const dateStr = dateEnregistrement.toString();
+          
+          // Format français "30/05/2025 10:41:24"
+          const frenchFormat = dateStr.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(\d{1,2}):(\d{1,2}):(\d{1,2})/);
+          if (frenchFormat) {
+            const [, day, month, year, hour, minute, second] = frenchFormat;
+            dateISO = new Date(year, month - 1, day, hour, minute, second).toISOString();
+          } else {
+            const parsedDate = new Date(dateStr);
+            if (!isNaN(parsedDate.getTime())) {
+              dateISO = parsedDate.toISOString();
+            } else {
+              errors.push(`Ligne ${rowNumber}: Format de date invalide "${dateStr}"`);
+              return;
+            }
+          }
+        } else {
+          errors.push(`Ligne ${rowNumber}: Format de date non supporté`);
+          return;
+        }
+
+        importedVINs.push({
+          code: codeStr,
+          date: dateISO,
+          userAgent: navigateur ? navigateur.toString() : 'Import Excel',
+          ipAddress: adresseIP ? adresseIP.toString() : 'Import',
+          hasImage: imageDisponible === 'Oui'
+        });
+
+      } catch (error) {
+        console.error(`Erreur ligne ${rowNumber}:`, error);
+        errors.push(`Ligne ${rowNumber}: Erreur lors du traitement - ${error.message}`);
+      }
+    });
+
+    console.log('VINs à importer:', importedVINs.length);
+    console.log('Erreurs de parsing:', errors.length);
+
+    // Insérer les VINs dans la base de données PostgreSQL
+    for (const vinData of importedVINs) {
+      try {
+        console.log('Insertion VIN:', vinData.code);
+        
+        await pool.query(`
+          INSERT INTO vins (code, date_created, image_data, user_agent, ip_address)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [
+          vinData.code, 
+          vinData.date, 
+          vinData.hasImage ? 'imported_image_placeholder' : null,
+          vinData.userAgent,
+          vinData.ipAddress
+        ]);
+        
+        imported++;
+        console.log('VIN inséré avec succès:', vinData.code);
+        
+      } catch (error) {
+        console.error('Erreur insertion:', error);
+        if (error.constraint === 'vins_code_key') {
+          duplicates++;
+        } else {
+          errors.push(`VIN ${vinData.code}: ${error.message}`);
+        }
+      }
+    }
+
+    console.log('=== RÉSULTATS IMPORT ===');
+    console.log('Importés:', imported);
+    console.log('Doublons:', duplicates);
+    console.log('Erreurs:', errors.length);
+
+    // Nettoyer le fichier temporaire
+    fs.unlinkSync(req.file.path);
+
+    res.json({
+      success: true,
+      message: `Import terminé avec succès`,
+      summary: {
+        totalLines: importedVINs.length,
+        imported: imported,
+        duplicates: duplicates,
+        errors: errors.length
+      },
+      details: {
+        importedCount: imported,
+        duplicatesCount: duplicates,
+        errorsCount: errors.length,
+        errorsList: errors.slice(0, 10)
+      }
+    });
+
+  } catch (error) {
+    console.error('Erreur lors de l\'import Excel :', error);
+    
+    // Nettoyer le fichier temporaire en cas d'erreur
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupError) {
+        console.error('Erreur lors du nettoyage du fichier :', cleanupError);
+      }
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: `Erreur lors de l'import: ${error.message}` 
+    });
   }
 });
 
