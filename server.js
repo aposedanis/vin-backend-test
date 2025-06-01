@@ -23,10 +23,118 @@ const pool = new Pool({
 const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
 const client = new vision.ImageAnnotatorClient({ credentials });
 
+// Variables pour le monitoring
+let serverStartTime = Date.now();
+let lastDatabaseCheck = null;
+let databaseStatus = 'unknown';
+
+// ========== ROUTES DE MONITORING (POUR UPTIMEROBOT) ==========
+
+// Route de health check simple pour UptimeRobot
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'alive',
+    service: 'VIN Tracker Backend',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor((Date.now() - serverStartTime) / 1000),
+    database: databaseStatus,
+    version: '2.0.0'
+  });
+});
+
+// Route de ping simple (alternative)
+app.get('/ping', (req, res) => {
+  res.send('pong');
+});
+
+// Route de statut complet avec test base de données
+app.get('/api/status', async (req, res) => {
+  try {
+    console.log('🔍 Test de statut demandé');
+    
+    // Test de connexion à la base
+    const startTime = Date.now();
+    const result = await pool.query('SELECT COUNT(*) as total FROM vins');
+    const dbResponseTime = Date.now() - startTime;
+    
+    databaseStatus = 'connected';
+    lastDatabaseCheck = new Date().toISOString();
+    
+    res.json({
+      status: 'healthy',
+      service: 'VIN Tracker Backend',
+      database: {
+        status: 'connected',
+        responseTime: `${dbResponseTime}ms`,
+        totalVins: parseInt(result.rows[0].total),
+        lastCheck: lastDatabaseCheck
+      },
+      server: {
+        uptime: `${Math.floor((Date.now() - serverStartTime) / 1000)} secondes`,
+        startTime: new Date(serverStartTime).toISOString(),
+        memoryUsage: process.memoryUsage(),
+        nodeVersion: process.version
+      },
+      timestamp: new Date().toISOString()
+    });
+    
+    console.log('✅ Test de statut réussi');
+  } catch (error) {
+    console.error('❌ Test de statut échoué:', error.message);
+    databaseStatus = 'disconnected';
+    
+    res.status(500).json({
+      status: 'unhealthy',
+      database: {
+        status: 'disconnected',
+        error: error.message,
+        lastCheck: new Date().toISOString()
+      },
+      server: {
+        uptime: `${Math.floor((Date.now() - serverStartTime) / 1000)} secondes`,
+        startTime: new Date(serverStartTime).toISOString()
+      },
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Route pour informations détaillées (debug)
+app.get('/api/info', (req, res) => {
+  res.json({
+    service: 'VIN Tracker Backend',
+    version: '2.0.0',
+    environment: process.env.NODE_ENV || 'production',
+    database: {
+      status: databaseStatus,
+      lastCheck: lastDatabaseCheck
+    },
+    server: {
+      startTime: new Date(serverStartTime).toISOString(),
+      uptime: Math.floor((Date.now() - serverStartTime) / 1000),
+      platform: process.platform,
+      nodeVersion: process.version,
+      memoryUsage: process.memoryUsage()
+    },
+    uptimeRobot: {
+      enabled: true,
+      pingUrl: '/api/health',
+      interval: '5 minutes',
+      purpose: 'Empêcher le sleep mode de Render'
+    }
+  });
+});
+
+// ========== INITIALISATION BASE DE DONNÉES ==========
+
 // Initialisation automatique de la base de données
 async function initDatabase() {
   try {
     console.log('🚀 Initialisation base Supabase...');
+    
+    // Test de connexion initial
+    await pool.query('SELECT NOW()');
+    console.log('✅ Connexion à Supabase établie');
     
     // Créer la table vins si elle n'existe pas
     await pool.query(`
@@ -63,19 +171,26 @@ async function initDatabase() {
     
     console.log('✅ Base Supabase initialisée avec succès');
     
-    // Test de connexion
+    // Test de connexion et comptage
     const result = await pool.query('SELECT COUNT(*) as total FROM vins');
     console.log(`📊 ${result.rows[0].total} VINs dans la base`);
     
+    databaseStatus = 'connected';
+    lastDatabaseCheck = new Date().toISOString();
+    
   } catch (error) {
     console.error('❌ Erreur init base:', error.message);
+    databaseStatus = 'disconnected';
   }
 }
+
+// ========== CONFIGURATION MULTER ==========
 
 // Configurer multer pour uploads
 const uploadsDir = './uploads/';
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Dossier uploads créé');
 }
 
 const storage = multer.diskStorage({
@@ -87,6 +202,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // ========== ROUTES OCR ==========
+
 app.post('/api/ocr/process', async (req, res) => {
   try {
     const { image } = req.body;
@@ -283,7 +399,7 @@ app.get('/api/vins/search', async (req, res) => {
   }
 });
 
-// Import Excel - ROUTE MANQUANTE AJOUTÉE
+// Import Excel
 app.post('/api/vins/import', upload.single('excelFile'), async (req, res) => {
   try {
     console.log('=== DÉBUT IMPORT EXCEL ===');
@@ -563,11 +679,14 @@ app.get('/api/vins/export', async (req, res) => {
   }
 });
 
-// Fonction de validation VIN
+// ========== FONCTIONS UTILITAIRES ==========
+
 function isValidVIN(vin) {
   const vinRegex = /^[A-HJ-NPR-Z0-9]{17}$/;
   return vinRegex.test(vin);
 }
+
+// ========== DÉMARRAGE SERVEUR ==========
 
 // Initialiser la base au démarrage
 initDatabase();
@@ -577,6 +696,11 @@ app.listen(port, () => {
   console.log(`🚗 Serveur VIN Tracker en écoute sur http://localhost:${port}`);
   console.log(`🗄️ Base de données Supabase PostgreSQL configurée`);
   console.log(`🔍 OCR Google Vision API configuré`);
+  console.log(`🏓 Routes de monitoring activées :`);
+  console.log(`   - Health Check: /api/health (pour UptimeRobot)`);
+  console.log(`   - Status Check: /api/status (détaillé)`);
+  console.log(`   - Ping Simple: /ping`);
+  console.log(`   - Info Serveur: /api/info`);
 });
 
 // Gestion gracieuse de l'arrêt
